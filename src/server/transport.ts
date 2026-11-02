@@ -8,6 +8,8 @@ import type { AddressInfo } from 'node:net';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { tokenRegistryFromEnv } from './tokenRegistry.js';
+import { WorkOSAuth, type WorkOSOptions } from './workos.js';
+import { fixedArgoCDCredentials } from './credentials.js';
 import {
   applyListenerSecurity,
   resolveListenerSecurity,
@@ -30,7 +32,7 @@ export const connectStdioTransport = () => {
   server.connect(new StdioServerTransport());
 };
 
-export type TransportOptions = ListenerSecurityOptions;
+export type TransportOptions = ListenerSecurityOptions & { workos?: WorkOSOptions };
 
 // Liveness probe, registered before the security middleware: a kubelet probe
 // addresses the pod IP and carries no bearer token. Reports only that we are up.
@@ -94,6 +96,7 @@ const resolveCredentials = (
 };
 
 export const connectSSETransport = (options: TransportOptions) => {
+  if (options.workos) throw new Error('WorkOS requires the stateless HTTP transport');
   const security = resolveListenerSecurity(options);
   const { port } = options;
   const app = express();
@@ -131,10 +134,21 @@ export const connectSSETransport = (options: TransportOptions) => {
 };
 
 export const connectHttpTransport = (options: TransportOptions & { stateless?: boolean }) => {
-  const security = resolveListenerSecurity(options);
   const { port, stateless = false } = options;
+  const workos = options.workos ? new WorkOSAuth(options.workos) : undefined;
+  if (workos) {
+    if (!stateless) throw new Error('WorkOS requires http --stateless to isolate callers');
+    fixedArgoCDCredentials(); // Fail before listening when the backend is not configured.
+  }
+  const security = resolveListenerSecurity({
+    ...options,
+    authenticate: workos?.middleware(),
+    allowedHostHeaders: workos ? [workos.resource.host] : options.allowedHostHeaders,
+    allowedOrigins: workos ? [workos.resource.origin] : options.allowedOrigins
+  });
   const app = express();
   registerHealthz(app);
+  workos?.registerRoutes(app);
   applyListenerSecurity(app, security);
   // After the security middleware, so malformed JSON returns 401/403 rather than
   // the body parser's 400, which would tell a caller it passed the credential check.
@@ -149,7 +163,15 @@ export const connectHttpTransport = (options: TransportOptions & { stateless?: b
     if (!stateless && sessionIdFromHeader && httpTransports[sessionIdFromHeader]) {
       transport = httpTransports[sessionIdFromHeader];
     } else if (stateless || (!sessionIdFromHeader && isInitializeRequest(req.body))) {
-      const credentials = resolveCredentials(req, res);
+      // Mounted tokens are read for every request, so Kubernetes secret rotation
+      // takes effect without a restart. No caller headers select the backend.
+      let credentials;
+      try {
+        credentials = workos ? fixedArgoCDCredentials() : resolveCredentials(req, res);
+      } catch {
+        res.status(503).json({ error: 'ArgoCD credentials unavailable' });
+        return;
+      }
       if (!credentials) return;
 
       transport = new StreamableHTTPServerTransport(
