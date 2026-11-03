@@ -152,6 +152,43 @@ This disables TLS certificate validation for Node.js when connecting to Argo CD 
 > **Warning**: Disabling SSL verification reduces security. Use this setting only in development environments or when you understand the security implications.
 
 
+### WorkOS Google/SSO sign-in (this fork)
+
+For hosted MCP clients, this fork can delegate sign-in, client registration,
+consent and refresh to [WorkOS Connect](https://workos.com/docs/authkit/mcp).
+Configure the existing AuthKit environment with your identity provider, enable
+CIMD/DCR, and register the exact endpoint URL as a Resource Indicator:
+
+```sh
+export WORKOS_AUTHKIT_DOMAIN=https://your-environment.authkit.app
+export WORKOS_RESOURCE_URL=https://mcp.example.com/mcp
+export WORKOS_ALLOWED_EMAIL_DOMAIN=example.com
+export ARGOCD_BASE_URL=https://argocd.example.com
+export ARGOCD_API_TOKEN_FILE=/var/run/secrets/argocd/token
+export MCP_READ_ONLY=true
+node dist/index.js http --stateless --bind-address 0.0.0.0
+```
+
+WorkOS mode requires stateless HTTP and a fixed Argo CD backend. It validates
+RS256 signatures, issuer, exact resource audience, expiry, Connect user grants,
+and same-token userinfo with a verified email in the exact allowed domain.
+Both HTTP 200 and 201 userinfo responses are accepted. The configured resource
+also fixes the accepted Host and Origin; `/healthz` remains available to probes.
+Discovery is public at `/.well-known/oauth-protected-resource/mcp` and its root
+alias; authorization-server discovery is forwarded to the configured issuer.
+
+The server strips caller credentials and Argo CD override headers. Token
+registries are rejected, so per-call URLs cannot select another backend.
+`ARGOCD_API_TOKEN` is an alternative to the mounted token file; they are mutually
+exclusive. File tokens are reread per request to support secret rotation.
+Do not set `MCP_AUTH_TOKEN` or `--allow-unauthenticated` with WorkOS.
+
+No WorkOS API key, Google client secret or local OAuth state is needed. Backend
+operations use the configured Argo CD account and its RBAC, not the connecting
+user's Argo CD identity. Use a dedicated least-privilege account; read-only mode
+also removes mutation tools. Verified email is not a live Workspace membership
+check: manage existing grants and their expiry/revocation in WorkOS.
+
 ### Providing ArgoCD Credentials
 
 The server connects to ArgoCD using a **base URL** and an **API token**.

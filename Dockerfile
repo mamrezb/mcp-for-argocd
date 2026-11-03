@@ -1,12 +1,12 @@
-FROM node:20-slim AS base
+FROM node:22-slim AS base
 ENV PNPM_HOME="/pnpm"
 ENV PATH="$PNPM_HOME:$PATH"
 # Run pnpm non-interactively: without a TTY, pnpm 10 otherwise aborts when it
 # needs to purge node_modules (ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY).
 ENV CI=true
 RUN corepack enable
-COPY . /app
 WORKDIR /app
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 
 FROM base AS prod-deps
 RUN --mount=type=cache,id=pnpm,target=/pnpm/store pnpm install --prod --frozen-lockfile
@@ -16,7 +16,7 @@ RUN --mount=type=cache,id=pnpm,target=/pnpm/store pnpm install --prod --frozen-l
 # emulation (fatal error: lfstack.push) when cross-building. The output is plain,
 # architecture-independent JavaScript, so it is safe to copy into a target-arch
 # final image below.
-FROM --platform=$BUILDPLATFORM node:20-slim AS build
+FROM --platform=$BUILDPLATFORM node:22-slim AS build
 ENV PNPM_HOME="/pnpm"
 ENV PATH="$PNPM_HOME:$PATH"
 ENV CI=true
@@ -26,7 +26,9 @@ WORKDIR /app
 RUN --mount=type=cache,id=pnpm,target=/pnpm/store pnpm install --frozen-lockfile
 RUN pnpm run build
 
-FROM base
+FROM node:22-slim
+WORKDIR /app
+COPY package.json ./
 COPY --from=prod-deps /app/node_modules /app/node_modules
 COPY --from=build /app/dist /app/dist
 EXPOSE 3000

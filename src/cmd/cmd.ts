@@ -8,6 +8,7 @@ import {
 } from '../server/transport.js';
 import { DEFAULT_BIND_ADDRESS } from '../server/security.js';
 import { logger } from '../logging/logging.js';
+import { workOSOptionsFromEnv } from '../server/workos.js';
 
 // Options shared by the two network transports. The inbound token is env-only:
 // argv is readable by every user on the machine via `ps`.
@@ -76,6 +77,7 @@ const transportOptions = (argv: ListenerArgv): TransportOptions => ({
   allowedHostHeaders: argv.allowedHostHeader,
   allowedOrigins: argv.allowedOrigin,
   authToken: process.env.MCP_AUTH_TOKEN,
+  workos: workOSOptionsFromEnv(),
   allowUnauthenticated: argv.allowUnauthenticated
 });
 

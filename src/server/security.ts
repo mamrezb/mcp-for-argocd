@@ -242,6 +242,7 @@ export type ListenerSecurity = {
   allowedHostnames: string[];
   allowedOrigins: string[];
   authToken?: string;
+  authenticate?: express.RequestHandler;
   // Host validation only makes sense for a loopback bind or an operator-supplied
   // allow list. On an exposed bind with no list, the name clients legitimately
   // use is unknown.
@@ -254,6 +255,7 @@ export type ListenerSecurityOptions = {
   allowedHostHeaders?: string[];
   allowedOrigins?: string[];
   authToken?: string;
+  authenticate?: express.RequestHandler;
   allowUnauthenticated?: boolean;
 };
 
@@ -262,6 +264,11 @@ export type ListenerSecurityOptions = {
 // that can route here.
 export const resolveListenerSecurity = (options: ListenerSecurityOptions): ListenerSecurity => {
   const bindAddress = canonicalizeBindAddress(options.bindAddress || DEFAULT_BIND_ADDRESS);
+  if (options.authenticate && (options.authToken !== undefined || options.allowUnauthenticated)) {
+    throw new Error(
+      'External token verification cannot be combined with MCP_AUTH_TOKEN or --allow-unauthenticated'
+    );
+  }
 
   // A set-but-empty token is a broken config (an unexpanded '${VAR}', a k8s secret
   // key that resolved to nothing), not a request to run without authentication.
@@ -283,7 +290,12 @@ export const resolveListenerSecurity = (options: ListenerSecurityOptions): Liste
     );
   }
 
-  if (!isLoopbackAddress(bindAddress) && !authToken && !options.allowUnauthenticated) {
+  if (
+    !isLoopbackAddress(bindAddress) &&
+    !authToken &&
+    !options.authenticate &&
+    !options.allowUnauthenticated
+  ) {
     throw new Error(
       `Refusing to bind to ${bindAddress} without inbound authentication. The MCP listener exposes ` +
         'every ArgoCD tool to anything that can reach it, and ARGOCD_API_TOKEN authenticates ' +
@@ -299,6 +311,7 @@ export const resolveListenerSecurity = (options: ListenerSecurityOptions): Liste
     allowedHostnames: resolveAllowedHostnames(bindAddress, options.allowedHostHeaders),
     allowedOrigins: resolveAllowedOrigins(options.port, options.allowedOrigins),
     authToken,
+    authenticate: options.authenticate,
     validateHostHeader:
       isLoopbackAddress(bindAddress) || (options.allowedHostHeaders?.length ?? 0) > 0
   };
@@ -312,6 +325,7 @@ export const applyListenerSecurity = (app: express.Express, security: ListenerSe
   // outside the allow list and 401 for one inside it, which is enough to
   // enumerate the allow lists without presenting a token.
   if (security.authToken) app.use(bearerAuth(security.authToken));
+  if (security.authenticate) app.use(security.authenticate);
   if (security.validateHostHeader) {
     app.use(hostHeaderValidation(security.allowedHostnames));
   } else {
@@ -329,7 +343,8 @@ export const applyListenerSecurity = (app: express.Express, security: ListenerSe
 // legitimate behind a proxy or mesh, but an operator who later removes that layer
 // has nothing else to remind them.
 const warnIfUnauthenticatedAndExposed = (security: ListenerSecurity): void => {
-  if (security.authToken || isLoopbackAddress(security.bindAddress)) return;
+  if (security.authToken || security.authenticate || isLoopbackAddress(security.bindAddress))
+    return;
   logger.warn(
     `The listener binds ${security.bindAddress} with no inbound authentication (--allow-unauthenticated). ` +
       'Every ArgoCD tool, including create/update/delete/sync_application and ' +
