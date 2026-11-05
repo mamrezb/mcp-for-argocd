@@ -1,3 +1,6 @@
+const requestTimeoutMs = 10_000;
+const responseLimitBytes = 10 * 1024 * 1024;
+
 export interface HttpResponse<T> {
   status: number;
   headers: Headers;
@@ -20,6 +23,38 @@ export class HttpClient {
     };
   }
 
+  private fetchResponse(url: URL, init?: RequestInit): Promise<Response> {
+    const deadline = AbortSignal.timeout(requestTimeoutMs);
+    return fetch(url, {
+      ...init,
+      headers: { ...init?.headers, ...this.headers },
+      signal: init?.signal ? AbortSignal.any([init.signal, deadline]) : deadline
+    });
+  }
+
+  private async *readResponseBody(response: Response): AsyncGenerator<Uint8Array> {
+    const reader = response.body?.getReader();
+    if (!reader) throw new Error('response body is not readable');
+    let size = 0;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        size += value.byteLength;
+        if (size > responseLimitBytes) {
+          throw new Error(
+            `response body exceeds maximum size of ${responseLimitBytes} bytes; try narrowing your request`
+          );
+        }
+        yield value;
+      }
+    } finally {
+      // Preserve the original timeout, parsing or callback error if cancellation also fails.
+      await reader.cancel().catch(() => undefined);
+      reader.releaseLock();
+    }
+  }
+
   private async request<R>(
     url: string,
     params?: SearchParams,
@@ -31,11 +66,10 @@ export class HttpClient {
         urlObject.searchParams.set(key, value?.toString() || '');
       });
     }
-    const response = await fetch(urlObject, {
-      ...init,
-      headers: { ...init?.headers, ...this.headers }
-    });
-    const body = await response.json();
+    const response = await this.fetchResponse(urlObject, init);
+    const chunks: Uint8Array[] = [];
+    for await (const chunk of this.readResponseBody(response)) chunks.push(chunk);
+    const body = JSON.parse(new TextDecoder().decode(Buffer.concat(chunks)));
     return {
       status: response.status,
       headers: response.headers,
@@ -55,21 +89,10 @@ export class HttpClient {
         urlObject.searchParams.set(key, value?.toString() || '');
       });
     }
-    const response = await fetch(urlObject, {
-      ...init,
-      headers: { ...init?.headers, ...this.headers }
-    });
-    const reader = response.body?.getReader();
-    if (!reader) {
-      throw new Error('response body is not readable');
-    }
+    const response = await this.fetchResponse(urlObject, init);
     const decoder = new TextDecoder('utf-8');
     let buffer = '';
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) {
-        break;
-      }
+    for await (const value of this.readResponseBody(response)) {
       buffer += decoder.decode(value, { stream: true });
       const lines = buffer.split('\n');
       buffer = lines.pop() || '';
